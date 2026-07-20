@@ -9,9 +9,18 @@
 
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
+use esp_hal::gpio::Pin;
+use esp_hal::i2c::master::{Config as ConfigI2C, I2c};
 use esp_hal::main;
-use esp_hal::time::{Duration, Instant};
-use log::info;
+use esp_hal::time::Rate;
+use root_bear_game::button::Button;
+use root_bear_game::game::Game;
+use root_bear_game::music::Song;
+use root_bear_game::sound::Sound;
+use ssd1306::mode::DisplayConfig;
+use ssd1306::rotation::DisplayRotation;
+use ssd1306::size::DisplaySize128x64;
+use ssd1306::{I2CDisplayInterface, Ssd1306};
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -48,11 +57,33 @@ fn main() -> ! {
     let _ = peripherals.GPIO16;
     let _ = peripherals.GPIO20;
 
-    loop {
-        info!("Hello world!");
-        let delay_start = Instant::now();
-        while delay_start.elapsed() < Duration::from_millis(500) {}
-    }
+    let button = Button::new(peripherals.GPIO4.degrade());
 
-    // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.1.0/examples
+    let i2c = I2c::new(
+        peripherals.I2C0,
+        ConfigI2C::default().with_frequency(Rate::from_khz(400)),
+    )
+    .unwrap()
+    .with_sda(peripherals.GPIO21)
+    .with_scl(peripherals.GPIO22);
+
+    let i2c = i2c.into_async();
+
+    let interface = I2CDisplayInterface::new(i2c);
+
+    let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
+        .into_buffered_graphics_mode();
+
+    display.init().unwrap();
+
+    let mut game = Game::new();
+
+    game.show_game_menu(&mut display);
+
+    let mut song = Sound::new(peripherals.GPIO13.degrade(), peripherals.LEDC);
+
+    loop {
+        game.process_frame(&mut display);
+        song.play_sound();
+    }
 }
