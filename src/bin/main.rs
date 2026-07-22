@@ -13,10 +13,9 @@ use esp_hal::gpio::Pin;
 use esp_hal::i2c::master::{Config as ConfigI2C, I2c};
 use esp_hal::main;
 use esp_hal::time::Rate;
-use root_bear_game::button::Button;
-use root_bear_game::game::Game;
-use root_bear_game::music::Song;
-use root_bear_game::sound::Sound;
+use root_bear_clone::button::Button;
+use root_bear_clone::game::Game;
+use root_bear_clone::sound::Sound;
 use ssd1306::mode::DisplayConfig;
 use ssd1306::rotation::DisplayRotation;
 use ssd1306::size::DisplaySize128x64;
@@ -57,7 +56,7 @@ fn main() -> ! {
     let _ = peripherals.GPIO16;
     let _ = peripherals.GPIO20;
 
-    let button = Button::new(peripherals.GPIO4.degrade());
+    let mut button = Button::new(peripherals.GPIO4.degrade());
 
     let i2c = I2c::new(
         peripherals.I2C0,
@@ -77,13 +76,16 @@ fn main() -> ! {
     display.init().unwrap();
 
     let mut game = Game::new();
+    let mut song = Sound::new(peripherals.GPIO13.degrade(), peripherals.LEDC);
 
     game.show_game_menu(&mut display);
 
-    let mut song = Sound::new(peripherals.GPIO13.degrade(), peripherals.LEDC);
-
     loop {
-        game.process_frame(&mut display);
-        song.play_sound();
+        game.process_frame(&mut display, &mut button);
+        if game.is_menu() {
+            song.play_menu_music();
+        } else {
+            song.stop();
+        }
     }
 }

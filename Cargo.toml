@@ -1,11 +1,11 @@
 [package]
 edition = "2024"
-name = "root-bear-game"
+name = "root-bear-clone"
 rust-version = "1.88"
 version = "0.1.0"
 
 [[bin]]
-name = "root-bear-game"
+name = "root-bear-clone"
 path = "./src/bin/main.rs"
 
 [dependencies]
