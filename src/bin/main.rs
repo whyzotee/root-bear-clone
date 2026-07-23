@@ -82,8 +82,16 @@ fn main() -> ! {
 
     loop {
         game.process_frame(&mut display, &mut button);
-        if game.is_menu() {
+        if let Some(result) = game.take_score_result() {
+            song.play_score_effect(result);
+        }
+
+        if song.advance_score_effect() {
+            continue;
+        } else if game.is_menu() {
             song.play_menu_music();
+        } else if game.is_pouring() {
+            song.play_pour_sound();
         } else {
             song.stop();
         }

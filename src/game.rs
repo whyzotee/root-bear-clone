@@ -21,6 +21,9 @@ use ssd1306::{
 
 use crate::button::Button;
 
+const MINIMUM_TIP_LEVEL: u8 = 4;
+const MAX_BEER_LEVEL: u8 = 27;
+
 pub type DisplayType<'a> = Ssd1306<
     I2CInterface<I2c<'a, Async>>,
     DisplaySize128x64,
@@ -32,6 +35,13 @@ pub enum GameState {
     InGame,
     GameOver,
     Wom,
+}
+
+#[derive(Clone, Copy)]
+pub enum ScoreResult {
+    Perfect,
+    SmallTip,
+    Miss,
 }
 
 enum GameMode {
@@ -55,8 +65,11 @@ pub struct Game {
     is_pouring: bool,
     beer_level: u8,
     beer_fill_started: Instant,
+    glass_shake_started: Instant,
+    glass_shake_phase: u8,
     awaiting_pour_release: bool,
     customer: u8,
+    pending_score_result: Option<ScoreResult>,
 }
 
 impl Game {
@@ -75,8 +88,11 @@ impl Game {
             is_pouring: false,
             beer_level: 0,
             beer_fill_started: Instant::now(),
+            glass_shake_started: Instant::now(),
+            glass_shake_phase: 0,
             awaiting_pour_release: false,
             customer: 0,
+            pending_score_result: None,
         }
     }
 
@@ -86,6 +102,14 @@ impl Game {
 
     pub fn is_menu(&self) -> bool {
         matches!(self.state, GameState::Menu)
+    }
+
+    pub fn is_pouring(&self) -> bool {
+        matches!(self.state, GameState::InGame) && self.is_pouring
+    }
+
+    pub fn take_score_result(&mut self) -> Option<ScoreResult> {
+        self.pending_score_result.take()
     }
 
     /// Handles the menu button and redraws only when an animation value changes.
@@ -110,6 +134,7 @@ impl Game {
             self.target_beer_level = 17;
             self.is_pouring = false;
             self.beer_level = 0;
+            self.glass_shake_phase = 0;
             self.awaiting_pour_release = true;
             self.draw_game(display);
             return;
@@ -152,17 +177,31 @@ impl Game {
             if !self.is_pouring {
                 self.is_pouring = true;
                 self.beer_fill_started = Instant::now();
+                self.glass_shake_started = Instant::now();
+                self.glass_shake_phase = 0;
                 needs_redraw = true;
-            } else if self.beer_level < self.target_beer_level
-                && self.beer_fill_started.elapsed() >= Duration::from_millis(80)
-            {
-                // Cap the pour at the target: the player can never overfill.
-                self.beer_level += 1;
+            } else if self.beer_fill_started.elapsed() >= Duration::from_millis(80) {
+                if self.beer_level < MAX_BEER_LEVEL {
+                    // The target earns the best tip, but the player can pour
+                    // past it until the glass is full.
+                    self.beer_level += 1;
+                } else {
+                    // Holding past a full glass spills the drink: no tip, a
+                    // new customer, and a release is required before retrying.
+                    self.serve_customer(true);
+                    self.awaiting_pour_release = true;
+                }
                 self.beer_fill_started = Instant::now();
                 needs_redraw = true;
             }
+
+            if self.glass_shake_started.elapsed() >= Duration::from_millis(55) {
+                self.glass_shake_phase = (self.glass_shake_phase + 1) % 3;
+                self.glass_shake_started = Instant::now();
+                needs_redraw = true;
+            }
         } else if self.is_pouring {
-            self.serve_customer();
+            self.serve_customer(false);
             needs_redraw = true;
         }
 
@@ -171,17 +210,23 @@ impl Game {
         }
     }
 
-    fn serve_customer(&mut self) {
-        if self.beer_level == self.target_beer_level {
+    fn serve_customer(&mut self, overflowed: bool) {
+        let result = if overflowed || self.beer_level < MINIMUM_TIP_LEVEL {
+            ScoreResult::Miss
+        } else if self.beer_level == self.target_beer_level {
             self.score += 10;
-        } else if self.beer_level > 0 {
+            ScoreResult::Perfect
+        } else {
             self.score += 1;
-        }
+            ScoreResult::SmallTip
+        };
+        self.pending_score_result = Some(result);
 
         self.customer = self.customer.wrapping_add(1);
         self.target_beer_level = 14 + self.customer % 5;
         self.beer_level = 0;
         self.is_pouring = false;
+        self.glass_shake_phase = 0;
         self.target_dash_offset = 0;
     }
 
@@ -329,6 +374,7 @@ impl Game {
             .unwrap();
 
         self.draw_bear(display);
+        self.draw_bear_emote(display);
         self.draw_glass(display);
 
         // Bottom-left money jar and the current tip total.
@@ -403,28 +449,72 @@ impl Game {
         .unwrap();
     }
 
+    fn draw_bear_emote(&self, display: &mut DisplayType) {
+        // The open space between the customer and glass becomes a compact
+        // speech bubble, so the bear reacts without obscuring the pour guide.
+        let emote = if !self.is_pouring {
+            "..."
+        } else if self.beer_level >= self.target_beer_level {
+            "^_^"
+        } else {
+            "o_o"
+        };
+        let bubble_style = MonoTextStyleBuilder::new()
+            .font(&FONT_6X10)
+            .text_color(BinaryColor::On)
+            .build();
+
+        Rectangle::new(
+            Point::new(51, 16),
+            embedded_graphics::geometry::Size::new(29, 14),
+        )
+        .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+        .draw(display)
+        .unwrap();
+        Line::new(Point::new(53, 29), Point::new(47, 33))
+            .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+            .draw(display)
+            .unwrap();
+        Line::new(Point::new(47, 33), Point::new(56, 29))
+            .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+            .draw(display)
+            .unwrap();
+        Text::with_baseline(emote, Point::new(57, 18), bubble_style, Baseline::Top)
+            .draw(display)
+            .unwrap();
+    }
+
     fn draw_glass(&self, display: &mut DisplayType) {
         const GLASS_LEFT: i32 = 91;
         const GLASS_TOP: i32 = 23;
+        let shake_x = if self.is_pouring {
+            match self.glass_shake_phase {
+                0 => -1,
+                1 => 1,
+                _ => 0,
+            }
+        } else {
+            0
+        };
         let target_y = 55 - self.target_beer_level as i32;
 
         // The glass is deliberately drawn before its contents and target marker.
         Rectangle::new(
-            Point::new(GLASS_LEFT, GLASS_TOP),
+            Point::new(GLASS_LEFT + shake_x, GLASS_TOP),
             embedded_graphics::geometry::Size::new(25, 32),
         )
         .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
         .draw(display)
         .unwrap();
-        Line::new(Point::new(94, 28), Point::new(113, 28))
+        Line::new(Point::new(94 + shake_x, 28), Point::new(113 + shake_x, 28))
             .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
             .draw(display)
             .unwrap();
-        Circle::new(Point::new(115, 30), 12)
+        Circle::new(Point::new(115 + shake_x, 30), 12)
             .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 2))
             .draw(display)
             .unwrap();
-        Line::new(Point::new(93, 58), Point::new(115, 58))
+        Line::new(Point::new(93 + shake_x, 58), Point::new(115 + shake_x, 58))
             .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
             .draw(display)
             .unwrap();
@@ -432,7 +522,7 @@ impl Game {
         if self.beer_level > 0 {
             let beer_top = 55 - self.beer_level as i32;
             Rectangle::new(
-                Point::new(93, beer_top),
+                Point::new(93 + shake_x, beer_top),
                 embedded_graphics::geometry::Size::new(21, self.beer_level as u32),
             )
             .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
@@ -443,7 +533,7 @@ impl Game {
             // They move one pixel every animation tick without blending into beer.
             let foam_shift = (self.target_dash_offset % 2) as i32;
             for bubble in 0..6 {
-                let x = 94 + bubble * 3 + foam_shift;
+                let x = 94 + bubble * 3 + foam_shift + shake_x;
                 Line::new(Point::new(x, beer_top + 1), Point::new(x + 1, beer_top + 1))
                     .into_styled(PrimitiveStyle::with_stroke(BinaryColor::Off, 1))
                     .draw(display)
@@ -459,7 +549,7 @@ impl Game {
         };
         for dash in 0..4 {
             // At every animation phase, the full dash remains within x=93..113.
-            let right = 98 + dash * 5 - self.target_dash_offset as i32;
+            let right = 98 + dash * 5 - self.target_dash_offset as i32 + shake_x;
             Line::new(Point::new(right - 2, target_y), Point::new(right, target_y))
                 .into_styled(PrimitiveStyle::with_stroke(dash_color, 1))
                 .draw(display)
